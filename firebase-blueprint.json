@@ -1,0 +1,68 @@
+{
+  "entities": {
+    "SharedTextDoc": {
+      "title": "SharedTextDoc",
+      "description": "Represents legacy single shared text pad document",
+      "type": "object",
+      "properties": {
+        "content": {
+          "type": "string",
+          "description": "The plain text content of the shared pad",
+          "maxLength": 1000000
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "The timestamp when the text document was last updated on the server"
+        }
+      },
+      "required": ["content"]
+    },
+    "PadFile": {
+      "title": "PadFile",
+      "description": "Represents an individual text file inside a pad's files subcollection",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "The display name of the text file",
+          "maxLength": 200
+        },
+        "content": {
+          "type": "string",
+          "description": "The plain text contents of this file",
+          "maxLength": 2000000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last updated timestamp"
+        },
+        "favorite": {
+          "type": "boolean",
+          "description": "Whether the file is marked as starred/favorite"
+        }
+      },
+      "required": ["name", "content"]
+    }
+  },
+  "firestore": {
+    "/sharedText/{docId}": {
+      "schema": "SharedTextDoc",
+      "description": "Legacy shared text pad document"
+    },
+    "/pads/{padId}": {
+      "schema": "SharedTextDoc",
+      "description": "Legacy pad document or parent pad container"
+    },
+    "/pads/{padId}/files/{fileId}": {
+      "schema": "PadFile",
+      "description": "Individual text files under the pad"
+    }
+  }
+}

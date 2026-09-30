@@ -1,0 +1,6 @@
+{
+  "name": "Cloud Text Pad",
+  "description": "A minimalist, real-time shared online text pad powered by Firebase Cloud Firestore with autosave, dark mode, offline backup, and custom pad URLs.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

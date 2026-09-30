@@ -1,0 +1,66 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global helper functions
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function isValidPadData(data) {
+      return data.keys().hasOnly(['content', 'updatedAt']) &&
+             data.content is string &&
+             data.content.size() <= 2000000;
+    }
+
+    function isValidFileData(data) {
+      return data.name is string &&
+             data.name.size() > 0 &&
+             data.name.size() <= 200 &&
+             data.content is string &&
+             data.content.size() <= 2000000 &&
+             (!('favorite' in data) || data.favorite is bool);
+    }
+
+    // Default catch-all deny rule for any unspecified paths
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Healthcheck connection test path
+    match /test/{docId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // Legacy shared text document (e.g. sharedText/main)
+    match /sharedText/{docId} {
+      allow get: if isValidId(docId);
+      allow list: if false;
+      allow create: if isValidId(docId) && isValidPadData(incoming());
+      allow update: if isValidId(docId) && isValidPadData(incoming());
+      allow delete: if false;
+    }
+
+    // Pad container and legacy single-document pads
+    match /pads/{padId} {
+      allow get: if isValidId(padId);
+      allow list: if false;
+      allow create, update: if isValidId(padId) && isValidPadData(incoming());
+      allow delete: if false;
+
+      // Subcollection of text files for each pad
+      match /files/{fileId} {
+        allow get, list: if isValidId(padId) && isValidId(fileId);
+        allow create: if isValidId(padId) && isValidId(fileId) && isValidFileData(incoming());
+        allow update: if isValidId(padId) && isValidId(fileId) && isValidFileData(incoming());
+        allow delete: if isValidId(padId) && isValidId(fileId);
+      }
+    }
+  }
+}
