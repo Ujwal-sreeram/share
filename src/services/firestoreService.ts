@@ -12,7 +12,6 @@ import {
   Timestamp,
   DocumentReference,
   DocumentData,
-  writeBatch
 } from 'firebase/firestore';
 import { db, isFirebaseConfigured } from '../firebase';
 
@@ -25,40 +24,34 @@ export interface TextFile {
   favorite?: boolean;
 }
 
-export interface PadData {
-  content: string;
-  updatedAt: Date | null;
-  serverTimestampRaw?: Timestamp | null;
-}
-
 export type SortOption = 'updated-desc' | 'name-asc' | 'name-desc' | 'created-desc' | 'created-asc';
 
+export const INTERNAL_DEFAULT_PAD = 'default';
+
 /**
- * Sanitizes the pad identifier:
- * Only allows lowercase alphanumeric, hyphens, and underscores.
- * Max length 64 characters.
+ * Sanitizes internal pad identifier to 'default'
  */
 export function sanitizePadId(rawPadId?: string | null): string {
-  if (!rawPadId) return 'main';
+  if (!rawPadId || rawPadId === 'main') return INTERNAL_DEFAULT_PAD;
   const trimmed = rawPadId.trim().toLowerCase();
   const cleaned = trimmed.replace(/[^a-z0-9_-]/g, '-').replace(/-+/g, '-').slice(0, 64);
-  return cleaned || 'main';
+  return cleaned || INTERNAL_DEFAULT_PAD;
 }
 
 /**
- * Resolves Firestore document reference for a pad.
- * Stores pads under collection 'pads'.
+ * Resolves Firestore document reference for internal pad
  */
-export function getPadDocRef(padId: string): DocumentReference<DocumentData> | null {
+export function getPadDocRef(padId: string = INTERNAL_DEFAULT_PAD): DocumentReference<DocumentData> | null {
   if (!db) return null;
   const sanitized = sanitizePadId(padId);
   return doc(db, 'pads', sanitized);
 }
 
 /**
- * Returns collection reference for files in a pad
+ * Returns collection reference for files in a pad:
+ * pads/default/files
  */
-export function getFilesCollectionRef(padId: string) {
+export function getFilesCollectionRef(padId: string = INTERNAL_DEFAULT_PAD) {
   if (!db) return null;
   const sanitized = sanitizePadId(padId);
   return collection(db, 'pads', sanitized, 'files');
@@ -152,12 +145,11 @@ export function clearLocalDraft(fileId: string): void {
   }
 }
 
-// Local mock storage for offline / unconfigured Firebase mode
-function getLocalFilesKey(padId: string): string {
+function getLocalFilesKey(padId: string = INTERNAL_DEFAULT_PAD): string {
   return `cloud_text_pad_local_files_${sanitizePadId(padId)}`;
 }
 
-export function getOfflineFiles(padId: string): TextFile[] {
+export function getOfflineFiles(padId: string = INTERNAL_DEFAULT_PAD): TextFile[] {
   try {
     const data = localStorage.getItem(getLocalFilesKey(padId));
     if (data) {
@@ -174,7 +166,7 @@ export function getOfflineFiles(padId: string): TextFile[] {
   return [];
 }
 
-export function saveOfflineFiles(padId: string, files: TextFile[]): void {
+export function saveOfflineFiles(padId: string = INTERNAL_DEFAULT_PAD, files: TextFile[]): void {
   try {
     localStorage.setItem(getLocalFilesKey(padId), JSON.stringify(files));
   } catch (e) {
@@ -187,30 +179,49 @@ export function saveOfflineFiles(padId: string, files: TextFile[]): void {
 // ==========================================
 
 /**
- * Subscribes to the list of files in a pad.
- * Updates in real-time when files are created, renamed, or deleted.
+ * Subscribes to the list of files in pads/default/files.
+ * Includes automatic 10s fallback so it never stays stuck loading.
  */
 export function subscribeToFilesList(
-  padId: string,
+  padId: string = INTERNAL_DEFAULT_PAD,
   onUpdate: (files: TextFile[]) => void,
   onError: (error: Error) => void
 ): () => void {
   const sanitized = sanitizePadId(padId);
 
+  // If Firebase is not configured or offline, return cached local files immediately
   if (!isFirebaseConfigured() || !db) {
-    // Deliver offline files from local storage
     const offlineList = getOfflineFiles(sanitized);
     onUpdate(offlineList);
     return () => {};
   }
 
   const filesCol = getFilesCollectionRef(sanitized);
-  if (!filesCol) return () => {};
+  if (!filesCol) {
+    const offlineList = getOfflineFiles(sanitized);
+    onUpdate(offlineList);
+    return () => {};
+  }
+
+  let hasResponded = false;
+
+  // 10-second safety timeout: If Firestore takes > 10 seconds to respond, deliver offline/fallback
+  const safetyTimeout = setTimeout(() => {
+    if (!hasResponded) {
+      hasResponded = true;
+      const offlineList = getOfflineFiles(sanitized);
+      onUpdate(offlineList);
+      onError(new Error('Connection timed out. Operating in offline/cached mode.'));
+    }
+  }, 10000);
 
   try {
     const unsubscribe = onSnapshot(
       filesCol,
       (snapshot) => {
+        hasResponded = true;
+        clearTimeout(safetyTimeout);
+
         const files: TextFile[] = [];
         snapshot.forEach((docSnap) => {
           const data = docSnap.data();
@@ -227,33 +238,38 @@ export function subscribeToFilesList(
           });
         });
 
-        // Update local backup of files list
         saveOfflineFiles(sanitized, files);
         onUpdate(files);
       },
       (error) => {
-        console.warn(`Files list snapshot notice on [${sanitized}]:`, error?.message || error);
-        // Fallback to cached/offline files
+        hasResponded = true;
+        clearTimeout(safetyTimeout);
+        console.warn('Firestore files snapshot error:', error);
         const offlineList = getOfflineFiles(sanitized);
-        if (offlineList.length > 0) {
-          onUpdate(offlineList);
-        }
+        onUpdate(offlineList);
         onError(error);
       }
     );
 
-    return unsubscribe;
+    return () => {
+      clearTimeout(safetyTimeout);
+      unsubscribe();
+    };
   } catch (err: any) {
+    clearTimeout(safetyTimeout);
+    const offlineList = getOfflineFiles(sanitized);
+    onUpdate(offlineList);
     onError(err);
     return () => {};
   }
 }
 
 /**
- * Subscribes to a single file document for real-time editor sync
+ * Subscribes to a single file document for real-time editor sync.
+ * Guarantees onUpdate or onError is triggered and never hangs.
  */
 export function subscribeToFile(
-  padId: string,
+  padId: string = INTERNAL_DEFAULT_PAD,
   fileId: string,
   onUpdate: (file: TextFile) => void,
   onError: (error: Error) => void
@@ -264,24 +280,53 @@ export function subscribeToFile(
     const offlineList = getOfflineFiles(sanitized);
     const found = offlineList.find((f) => f.id === fileId);
     if (found) {
-      // Check local draft
       const draft = getLocalDraft(fileId);
       if (draft) {
         onUpdate({ ...found, content: draft.content, updatedAt: draft.savedAt || found.updatedAt });
       } else {
         onUpdate(found);
       }
+    } else {
+      onError(new Error('File not found in local cache.'));
     }
     return () => {};
   }
 
   const fileDocRef = doc(db, 'pads', sanitized, 'files', fileId);
 
+  let hasResponded = false;
+  const safetyTimeout = setTimeout(() => {
+    if (!hasResponded) {
+      hasResponded = true;
+      const offlineList = getOfflineFiles(sanitized);
+      const found = offlineList.find((f) => f.id === fileId);
+      if (found) {
+        onUpdate(found);
+      } else {
+        onError(new Error('Timed out waiting for file response.'));
+      }
+    }
+  }, 10000);
+
   try {
     const unsubscribe = onSnapshot(
       fileDocRef,
       (docSnap) => {
-        if (!docSnap.exists()) return;
+        hasResponded = true;
+        clearTimeout(safetyTimeout);
+
+        if (!docSnap.exists()) {
+          // Document does not exist in Firestore: check local cache or report error
+          const offlineList = getOfflineFiles(sanitized);
+          const found = offlineList.find((f) => f.id === fileId);
+          if (found) {
+            onUpdate(found);
+          } else {
+            onError(new Error('Document does not exist.'));
+          }
+          return;
+        }
+
         const data = docSnap.data();
         const createdAt = data.createdAt instanceof Timestamp ? data.createdAt.toDate() : null;
         const updatedAt = data.updatedAt instanceof Timestamp ? data.updatedAt.toDate() : null;
@@ -296,13 +341,29 @@ export function subscribeToFile(
         });
       },
       (error) => {
-        console.error(`File snapshot error on [${fileId}]:`, error);
+        hasResponded = true;
+        clearTimeout(safetyTimeout);
+        console.warn(`File snapshot error for [${fileId}]:`, error);
+        const offlineList = getOfflineFiles(sanitized);
+        const found = offlineList.find((f) => f.id === fileId);
+        if (found) {
+          onUpdate(found);
+        }
         onError(error);
       }
     );
 
-    return unsubscribe;
+    return () => {
+      clearTimeout(safetyTimeout);
+      unsubscribe();
+    };
   } catch (err: any) {
+    clearTimeout(safetyTimeout);
+    const offlineList = getOfflineFiles(sanitized);
+    const found = offlineList.find((f) => f.id === fileId);
+    if (found) {
+      onUpdate(found);
+    }
     onError(err);
     return () => {};
   }
@@ -328,10 +389,10 @@ export function generateUniqueFileName(baseName: string, existingNames: string[]
 }
 
 /**
- * Create a new file in the pad
+ * Create a new file in pads/default/files
  */
 export async function createFile(
-  padId: string,
+  padId: string = INTERNAL_DEFAULT_PAD,
   name: string,
   content: string = '',
   favorite: boolean = false
@@ -348,174 +409,201 @@ export async function createFile(
   };
 
   if (!isFirebaseConfigured() || !db) {
-    const offlineList = getOfflineFiles(sanitized);
-    const uniqueId = `local_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+    const offlineFiles = getOfflineFiles(sanitized);
     const newFile: TextFile = {
-      id: uniqueId,
+      id: `local_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
       ...newFileData
     };
-    saveOfflineFiles(sanitized, [newFile, ...offlineList]);
-    saveLocalDraft(uniqueId, content);
+    saveOfflineFiles(sanitized, [newFile, ...offlineFiles]);
     return newFile;
   }
 
-  const filesCol = getFilesCollectionRef(sanitized);
-  if (!filesCol) throw new Error('Firestore not initialized');
+  try {
+    const filesCol = getFilesCollectionRef(sanitized);
+    if (!filesCol) throw new Error('Files collection ref unavailable');
 
-  const docRef = await addDoc(filesCol, {
-    name: finalName,
-    content,
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-    favorite
-  });
+    const docRef = await addDoc(filesCol, {
+      name: finalName,
+      content,
+      favorite,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    });
 
-  saveLocalDraft(docRef.id, content);
+    const created: TextFile = {
+      id: docRef.id,
+      ...newFileData
+    };
 
-  return {
-    id: docRef.id,
-    name: finalName,
-    content,
-    createdAt: new Date(),
-    updatedAt: new Date(),
-    favorite
-  };
+    // Update local cache
+    const offlineFiles = getOfflineFiles(sanitized);
+    saveOfflineFiles(sanitized, [created, ...offlineFiles]);
+    return created;
+  } catch (err: any) {
+    console.warn('Firestore file create error, saving locally:', err);
+    const offlineFiles = getOfflineFiles(sanitized);
+    const newFile: TextFile = {
+      id: `local_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      ...newFileData
+    };
+    saveOfflineFiles(sanitized, [newFile, ...offlineFiles]);
+    return newFile;
+  }
 }
 
 /**
- * Saves text content to an existing file
+ * Save / update file content in pads/default/files
  */
 export async function saveFileContent(
-  padId: string,
+  padId: string = INTERNAL_DEFAULT_PAD,
   fileId: string,
   content: string
 ): Promise<Date> {
   const sanitized = sanitizePadId(padId);
-  saveLocalDraft(fileId, content);
+  const now = new Date();
 
-  if (!isFirebaseConfigured() || !db) {
-    const offlineList = getOfflineFiles(sanitized);
-    const updated = offlineList.map((f) =>
-      f.id === fileId ? { ...f, content, updatedAt: new Date() } : f
-    );
-    saveOfflineFiles(sanitized, updated);
-    return new Date();
+  // Always update local storage first
+  const offlineFiles = getOfflineFiles(sanitized);
+  const updatedOffline = offlineFiles.map((f) =>
+    f.id === fileId ? { ...f, content, updatedAt: now } : f
+  );
+  saveOfflineFiles(sanitized, updatedOffline);
+
+  if (!isFirebaseConfigured() || !db || fileId.startsWith('local_')) {
+    return now;
   }
 
-  const fileDocRef = doc(db, 'pads', sanitized, 'files', fileId);
-  await updateDoc(fileDocRef, {
-    content,
-    updatedAt: serverTimestamp()
-  });
-
-  return new Date();
+  try {
+    const fileDocRef = doc(db, 'pads', sanitized, 'files', fileId);
+    await updateDoc(fileDocRef, {
+      content,
+      updatedAt: serverTimestamp()
+    });
+    return now;
+  } catch (err: any) {
+    console.warn('Firestore updateDoc warning, saved locally:', err);
+    return now;
+  }
 }
 
 /**
- * Renames a file
+ * Rename a file
  */
 export async function renameFile(
-  padId: string,
+  padId: string = INTERNAL_DEFAULT_PAD,
   fileId: string,
   newName: string
 ): Promise<void> {
   const sanitized = sanitizePadId(padId);
   const trimmed = newName.trim();
-  if (!trimmed) throw new Error('File name cannot be empty');
+  if (!trimmed) return;
 
-  if (!isFirebaseConfigured() || !db) {
-    const offlineList = getOfflineFiles(sanitized);
-    const updated = offlineList.map((f) =>
-      f.id === fileId ? { ...f, name: trimmed, updatedAt: new Date() } : f
-    );
-    saveOfflineFiles(sanitized, updated);
+  const offlineFiles = getOfflineFiles(sanitized);
+  const updatedOffline = offlineFiles.map((f) =>
+    f.id === fileId ? { ...f, name: trimmed, updatedAt: new Date() } : f
+  );
+  saveOfflineFiles(sanitized, updatedOffline);
+
+  if (!isFirebaseConfigured() || !db || fileId.startsWith('local_')) {
     return;
   }
 
-  const fileDocRef = doc(db, 'pads', sanitized, 'files', fileId);
-  await updateDoc(fileDocRef, {
-    name: trimmed,
-    updatedAt: serverTimestamp()
-  });
+  try {
+    const fileDocRef = doc(db, 'pads', sanitized, 'files', fileId);
+    await updateDoc(fileDocRef, {
+      name: trimmed,
+      updatedAt: serverTimestamp()
+    });
+  } catch (err: any) {
+    console.warn('Firestore rename warning, saved locally:', err);
+  }
 }
 
 /**
- * Toggles the favorite status of a file
+ * Toggle favorite flag on a file
  */
 export async function toggleFavoriteFile(
-  padId: string,
+  padId: string = INTERNAL_DEFAULT_PAD,
   fileId: string,
   currentFavorite: boolean
-): Promise<void> {
+): Promise<boolean> {
   const sanitized = sanitizePadId(padId);
-  const nextFav = !currentFavorite;
+  const nextFavorite = !currentFavorite;
 
-  if (!isFirebaseConfigured() || !db) {
-    const offlineList = getOfflineFiles(sanitized);
-    const updated = offlineList.map((f) =>
-      f.id === fileId ? { ...f, favorite: nextFav } : f
-    );
-    saveOfflineFiles(sanitized, updated);
-    return;
+  const offlineFiles = getOfflineFiles(sanitized);
+  const updatedOffline = offlineFiles.map((f) =>
+    f.id === fileId ? { ...f, favorite: nextFavorite } : f
+  );
+  saveOfflineFiles(sanitized, updatedOffline);
+
+  if (!isFirebaseConfigured() || !db || fileId.startsWith('local_')) {
+    return nextFavorite;
   }
 
-  const fileDocRef = doc(db, 'pads', sanitized, 'files', fileId);
-  await updateDoc(fileDocRef, {
-    favorite: nextFav
-  });
+  try {
+    const fileDocRef = doc(db, 'pads', sanitized, 'files', fileId);
+    await updateDoc(fileDocRef, {
+      favorite: nextFavorite
+    });
+  } catch (err: any) {
+    console.warn('Firestore favorite toggle warning:', err);
+  }
+
+  return nextFavorite;
 }
 
 /**
- * Deletes a file document
+ * Delete a file
  */
 export async function deleteFileDoc(
-  padId: string,
+  padId: string = INTERNAL_DEFAULT_PAD,
   fileId: string
 ): Promise<void> {
   const sanitized = sanitizePadId(padId);
+
+  const offlineFiles = getOfflineFiles(sanitized);
+  saveOfflineFiles(sanitized, offlineFiles.filter((f) => f.id !== fileId));
   clearLocalDraft(fileId);
 
-  if (!isFirebaseConfigured() || !db) {
-    const offlineList = getOfflineFiles(sanitized);
-    const updated = offlineList.filter((f) => f.id !== fileId);
-    saveOfflineFiles(sanitized, updated);
+  if (!isFirebaseConfigured() || !db || fileId.startsWith('local_')) {
     return;
   }
 
-  const fileDocRef = doc(db, 'pads', sanitized, 'files', fileId);
-  await deleteDoc(fileDocRef);
+  try {
+    const fileDocRef = doc(db, 'pads', sanitized, 'files', fileId);
+    await deleteDoc(fileDocRef);
+  } catch (err: any) {
+    console.warn('Firestore deleteDoc warning:', err);
+  }
 }
 
 /**
- * Duplicates an existing file
+ * Duplicate an existing file
  */
 export async function duplicateFile(
-  padId: string,
-  file: TextFile,
+  padId: string = INTERNAL_DEFAULT_PAD,
+  sourceFile: TextFile,
   existingNames: string[]
 ): Promise<TextFile> {
-  let baseCopyName = `${file.name} Copy`;
-  const uniqueName = generateUniqueFileName(baseCopyName, existingNames);
-  return createFile(padId, uniqueName, file.content, file.favorite);
+  const newName = generateUniqueFileName(`${sourceFile.name} (Copy)`, existingNames);
+  return createFile(padId, newName, sourceFile.content, sourceFile.favorite || false);
 }
 
 // ==========================================
 // Migration of Existing Single-Text Document
 // ==========================================
 
-export async function migrateLegacyDataIfAny(padId: string): Promise<boolean> {
+export async function migrateLegacyDataIfAny(padId: string = INTERNAL_DEFAULT_PAD): Promise<boolean> {
   const sanitized = sanitizePadId(padId);
   const migrationKey = `cloud_text_pad_migrated_${sanitized}`;
 
   if (localStorage.getItem(migrationKey)) {
-    return false; // Already migrated for this pad
+    return false;
   }
 
   try {
     if (!isFirebaseConfigured() || !db) {
-      // Check if offline legacy backup exists
-      const legacyBackupKey = sanitized === 'main' ? 'cloudTextPadBackup' : `cloudTextPadBackup_${sanitized}`;
-      const rawBackup = localStorage.getItem(legacyBackupKey);
+      const rawBackup = localStorage.getItem('cloudTextPadBackup');
       const existingOfflineFiles = getOfflineFiles(sanitized);
 
       if (rawBackup && existingOfflineFiles.length === 0) {
@@ -533,48 +621,35 @@ export async function migrateLegacyDataIfAny(padId: string): Promise<boolean> {
           return true;
         }
       }
-      return false;
-    }
-
-    // Check if new subcollection has any files already
-    const filesCol = getFilesCollectionRef(sanitized);
-    if (!filesCol) return false;
-
-    const filesSnap = await getDocs(filesCol);
-    if (!filesSnap.empty) {
       localStorage.setItem(migrationKey, 'true');
       return false;
     }
 
-    // Files collection is empty! Check legacy single text document
+    const filesCol = getFilesCollectionRef(sanitized);
+    if (!filesCol) return false;
+
+    // Use a fast query with timeout so migration check never blocks
+    const filesSnapPromise = getDocs(filesCol);
+    const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000));
+    const filesSnap = await Promise.race([filesSnapPromise, timeoutPromise]);
+
+    if (!filesSnap || !filesSnap.empty) {
+      localStorage.setItem(migrationKey, 'true');
+      return false;
+    }
+
+    // Check legacy single text document if empty
     let legacyText = '';
-    let legacyDocSnap;
-
-    if (sanitized === 'main') {
-      legacyDocSnap = await getDoc(doc(db, 'sharedText', 'main'));
-    } else {
-      legacyDocSnap = await getDoc(doc(db, 'pads', sanitized));
-    }
-
-    if (legacyDocSnap && legacyDocSnap.exists()) {
-      const data = legacyDocSnap.data();
-      if (typeof data.content === 'string' && data.content.trim()) {
-        legacyText = data.content;
-      }
-    }
-
-    // Fallback to local legacy backup if Firestore had none
-    if (!legacyText.trim()) {
-      const legacyBackupKey = sanitized === 'main' ? 'cloudTextPadBackup' : `cloudTextPadBackup_${sanitized}`;
-      const rawBackup = localStorage.getItem(legacyBackupKey);
-      if (rawBackup) {
-        try {
-          const parsed = JSON.parse(rawBackup);
-          legacyText = parsed.content || '';
-        } catch {
-          legacyText = rawBackup;
+    try {
+      const legacyDocSnap = await getDoc(doc(db, 'sharedText', 'main'));
+      if (legacyDocSnap && legacyDocSnap.exists()) {
+        const data = legacyDocSnap.data();
+        if (typeof data.content === 'string' && data.content.trim()) {
+          legacyText = data.content;
         }
       }
+    } catch {
+      // Ignore if document doesn't exist
     }
 
     if (legacyText.trim()) {
@@ -587,6 +662,7 @@ export async function migrateLegacyDataIfAny(padId: string): Promise<boolean> {
     return false;
   } catch (error) {
     console.warn('Legacy migration check notice:', error);
+    localStorage.setItem(migrationKey, 'true');
     return false;
   }
 }
@@ -608,7 +684,7 @@ export interface PadBackupJSON {
   }[];
 }
 
-export function generateBackupData(padId: string, files: TextFile[]): PadBackupJSON {
+export function generateBackupData(padId: string = INTERNAL_DEFAULT_PAD, files: TextFile[]): PadBackupJSON {
   return {
     version: 1,
     exportedAt: new Date().toISOString(),
@@ -624,7 +700,7 @@ export function generateBackupData(padId: string, files: TextFile[]): PadBackupJ
 }
 
 export async function restoreFromBackup(
-  padId: string,
+  padId: string = INTERNAL_DEFAULT_PAD,
   backup: PadBackupJSON,
   mode: 'replace' | 'merge',
   currentFiles: TextFile[]
@@ -632,13 +708,11 @@ export async function restoreFromBackup(
   const sanitized = sanitizePadId(padId);
 
   if (mode === 'replace') {
-    // Delete current files first
     for (const f of currentFiles) {
       await deleteFileDoc(sanitized, f.id);
     }
   }
 
-  // Add all files from backup
   const existingNames = mode === 'replace' ? [] : currentFiles.map((f) => f.name);
 
   for (const item of backup.files) {
@@ -646,29 +720,4 @@ export async function restoreFromBackup(
     existingNames.push(uniqueName);
     await createFile(sanitized, uniqueName, item.content, item.favorite || false);
   }
-}
-
-// Legacy single-doc fallback exports (kept for zero regressions)
-export async function loadText(padId: string): Promise<PadData> {
-  const sanitized = sanitizePadId(padId);
-  const files = getOfflineFiles(sanitized);
-  if (files.length > 0) {
-    return {
-      content: files[0].content,
-      updatedAt: files[0].updatedAt
-    };
-  }
-  return { content: '', updatedAt: null };
-}
-
-export async function saveText(padId: string, content: string): Promise<Date> {
-  return new Date();
-}
-
-export function subscribeToChanges(
-  padId: string,
-  onUpdate: (data: PadData) => void,
-  onError: (error: Error) => void
-): () => void {
-  return () => {};
 }

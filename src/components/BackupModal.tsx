@@ -45,7 +45,7 @@ export const BackupModal: React.FC<BackupModalProps> = ({
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `cloud-text-pad-backup-${padId}.json`;
+    a.download = `cloud-text-pad-backup.json`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -106,7 +106,7 @@ export const BackupModal: React.FC<BackupModalProps> = ({
                 Backup & Restore
               </h3>
               <p className="text-xs text-stone-500 dark:text-stone-400">
-                JSON export and import for Pad "{padId}"
+                JSON export and import for all your files
               </p>
             </div>
           </div>
@@ -133,7 +133,7 @@ export const BackupModal: React.FC<BackupModalProps> = ({
             className="w-full inline-flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-xs font-semibold bg-stone-900 text-white dark:bg-stone-700 dark:hover:bg-stone-600 hover:bg-stone-800 disabled:opacity-40 transition"
           >
             <FileJson className="w-4 h-4" />
-            <span>Download cloud-text-pad-backup-{padId}.json</span>
+            <span>Download cloud-text-pad-backup.json</span>
           </button>
         </div>
 

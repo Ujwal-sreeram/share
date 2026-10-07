@@ -14,8 +14,6 @@ import { Editor } from './components/Editor';
 import { FooterStatus, SaveStatus } from './components/FooterStatus';
 import { RemoteConflictBanner } from './components/RemoteConflictBanner';
 import { ConfirmClearModal } from './components/ConfirmClearModal';
-import { PadSwitcherModal } from './components/PadSwitcherModal';
-import { SettingsModal } from './components/SettingsModal';
 import { NewFileModal } from './components/NewFileModal';
 import { RenameModal } from './components/RenameModal';
 import { DeleteConfirmModal } from './components/DeleteConfirmModal';
@@ -23,6 +21,7 @@ import { BackupModal } from './components/BackupModal';
 import { EmptyState } from './components/EmptyState';
 import {
   TextFile,
+  INTERNAL_DEFAULT_PAD,
   subscribeToFilesList,
   subscribeToFile,
   createFile,
@@ -35,27 +34,11 @@ import {
   getLocalDraft,
   saveLocalDraft,
   clearLocalDraft,
-  sanitizePadId
 } from './services/firestoreService';
-import { isFirebaseConfigured } from './firebase';
 
 export default function App() {
-  // Pad identifier from URL query param ?pad=xyz
-  const [currentPad, setCurrentPad] = useState<string>(() => {
-    const params = new URLSearchParams(window.location.search);
-    const rawPad = params.get('pad');
-    return sanitizePadId(rawPad);
-  });
-
-  // Recent pads stored in localStorage
-  const [recentPads, setRecentPads] = useState<string[]>(() => {
-    try {
-      const saved = localStorage.getItem('cloud_text_pad_recent');
-      return saved ? JSON.parse(saved) : ['main'];
-    } catch {
-      return ['main'];
-    }
-  });
+  // Fixed internal pad identifier
+  const currentPad = INTERNAL_DEFAULT_PAD;
 
   // Dark / Light Theme
   const [isDarkMode, setIsDarkMode] = useState<boolean>(() => {
@@ -70,7 +53,7 @@ export default function App() {
     const params = new URLSearchParams(window.location.search);
     const fileParam = params.get('file');
     if (fileParam) return fileParam;
-    return localStorage.getItem(`cloud_text_pad_active_file_${currentPad}`) || null;
+    return localStorage.getItem('cloud_text_pad_active_file') || null;
   });
 
   // Text editor state for currently opened file
@@ -101,8 +84,6 @@ export default function App() {
   const [renamingFile, setRenamingFile] = useState<TextFile | null>(null);
   const [deletingFile, setDeletingFile] = useState<TextFile | null>(null);
   const [isClearModalOpen, setIsClearModalOpen] = useState<boolean>(false);
-  const [isPadSwitcherOpen, setIsPadSwitcherOpen] = useState<boolean>(false);
-  const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
   const [isBackupModalOpen, setIsBackupModalOpen] = useState<boolean>(false);
 
   // In-editor text search state
@@ -118,9 +99,6 @@ export default function App() {
 
   // Hidden file input ref for importing .txt files
   const fileInputRef = useRef<HTMLInputElement>(null);
-
-  // Check if Firebase has live credentials
-  const isFirebaseActive = useMemo(() => isFirebaseConfigured(), []);
 
   // Refs for tracking active values inside async timers and callbacks
   const activeFileIdRef = useRef<string | null>(activeFileId);
@@ -169,20 +147,6 @@ export default function App() {
     };
   }, []);
 
-  // Save current pad to recents list
-  const addToRecentPads = useCallback((padId: string) => {
-    setRecentPads((prev) => {
-      const filtered = prev.filter((p) => p !== padId);
-      const updated = [padId, ...filtered].slice(0, 10);
-      try {
-        localStorage.setItem('cloud_text_pad_recent', JSON.stringify(updated));
-      } catch (e) {
-        console.warn('Failed to store recent pads:', e);
-      }
-      return updated;
-    });
-  }, []);
-
   // Perform Save for a given file
   const performSave = useCallback(async (fileId: string, contentToSave: string) => {
     setSaveStatus('saving');
@@ -197,7 +161,7 @@ export default function App() {
     } catch (err: any) {
       console.error('Save failed:', err);
       setSaveStatus('error');
-      setErrorMessage(err?.message || 'Check Firestore connection');
+      setErrorMessage(err?.message || 'Failed to save changes');
     }
   }, [currentPad]);
 
@@ -232,11 +196,10 @@ export default function App() {
     }
   }, [autosave, activeFileId, performSave]);
 
-  // Switching active file safely (saves current file before opening new file)
+  // Switching active file safely
   const handleSelectFile = useCallback(async (newFileId: string) => {
     if (newFileId === activeFileId) return;
 
-    // If current file has unsaved changes, save immediately before switching
     if (hasUnsavedRef.current && activeFileIdRef.current) {
       if (autosaveTimerRef.current) {
         clearTimeout(autosaveTimerRef.current);
@@ -250,29 +213,33 @@ export default function App() {
       }
     }
 
-    // Update URL query & storage
     const url = new URL(window.location.href);
     url.searchParams.set('file', newFileId);
     window.history.pushState({}, '', url.toString());
 
-    localStorage.setItem(`cloud_text_pad_active_file_${currentPad}`, newFileId);
+    localStorage.setItem('cloud_text_pad_active_file', newFileId);
     setActiveFileId(newFileId);
     setRemoteConflict(null);
     setHasUnsavedChanges(false);
   }, [activeFileId, currentPad]);
 
-  // Subscribe to Pad's Files List and check migration on load
+  // Key to force-reload file list on retry
+  const [reloadKey, setReloadKey] = useState<number>(0);
+
+  const handleRetry = useCallback(() => {
+    setErrorMessage(null);
+    setIsLoadingFiles(true);
+    setReloadKey((k) => k + 1);
+  }, []);
+
+  // Subscribe to Files List
   useEffect(() => {
     let isSubscribed = true;
     setIsLoadingFiles(true);
-    addToRecentPads(currentPad);
+    setErrorMessage(null);
 
-    // Run legacy migration check (copies single sharedText/main if files collection is empty)
-    migrateLegacyDataIfAny(currentPad)
-      .then((migrated) => {
-        if (migrated) console.log('Legacy data migrated to files subcollection');
-      })
-      .catch((e) => console.warn('Migration check notice:', e));
+    // Fast non-blocking migration check
+    migrateLegacyDataIfAny(currentPad).catch((e) => console.warn('Migration notice:', e));
 
     const unsubscribe = subscribeToFilesList(
       currentPad,
@@ -280,14 +247,14 @@ export default function App() {
         if (!isSubscribed) return;
         setFiles(fetchedFiles);
         setIsLoadingFiles(false);
+        setErrorMessage(null);
 
-        // Auto select a file if none is selected or selected file was deleted
         if (fetchedFiles.length > 0) {
           const currentValid = fetchedFiles.some((f) => f.id === activeFileIdRef.current);
           if (!activeFileIdRef.current || !currentValid) {
             const firstId = fetchedFiles[0].id;
             setActiveFileId(firstId);
-            localStorage.setItem(`cloud_text_pad_active_file_${currentPad}`, firstId);
+            localStorage.setItem('cloud_text_pad_active_file', firstId);
           }
         } else {
           setActiveFileId(null);
@@ -295,8 +262,10 @@ export default function App() {
         }
       },
       (error) => {
-        console.warn('Files list subscription error:', error);
+        if (!isSubscribed) return;
+        console.warn('Files list error:', error);
         setIsLoadingFiles(false);
+        setErrorMessage(error?.message || 'Unable to connect to cloud storage');
       }
     );
 
@@ -304,20 +273,20 @@ export default function App() {
       isSubscribed = false;
       unsubscribe();
     };
-  }, [currentPad, addToRecentPads]);
+  }, [currentPad, reloadKey]);
 
-  // Subscribe to currently active file document for real-time editor content
+  // Subscribe to currently active file document
   useEffect(() => {
     if (!activeFileId) {
       setText('');
       setLastUpdated(null);
+      setIsLoadingActiveFile(false);
       return;
     }
 
     let isSubscribed = true;
     setIsLoadingActiveFile(true);
 
-    // Check local draft first
     const draft = getLocalDraft(activeFileId);
     if (draft) {
       setText(draft.content);
@@ -337,7 +306,6 @@ export default function App() {
         if (!isSubscribed) return;
         setIsLoadingActiveFile(false);
 
-        // If remote content matches local editor text, just sync timestamp
         if (updatedFile.content === textRef.current) {
           setLastUpdated(updatedFile.updatedAt);
           setSaveStatus('saved');
@@ -346,14 +314,12 @@ export default function App() {
           return;
         }
 
-        // If user has unsaved local changes, do NOT overwrite text!
         if (hasUnsavedRef.current) {
           setRemoteConflict({
             remoteContent: updatedFile.content,
             remoteUpdatedAt: updatedFile.updatedAt
           });
         } else {
-          // Otherwise, update editor seamlessly
           setText(updatedFile.content);
           setLastUpdated(updatedFile.updatedAt);
           setSaveStatus('saved');
@@ -362,7 +328,8 @@ export default function App() {
         }
       },
       (error) => {
-        console.warn('Active file snapshot error:', error);
+        if (!isSubscribed) return;
+        console.warn('Active file snapshot warning:', error);
         setIsLoadingActiveFile(false);
       }
     );
@@ -376,11 +343,7 @@ export default function App() {
     };
   }, [currentPad, activeFileId]);
 
-  // Keyboard Shortcuts:
-  // Ctrl/Cmd + S = Save current file
-  // Ctrl/Cmd + N = New File
-  // Ctrl/Cmd + F = Search in text
-  // Ctrl/Cmd + Shift + F = Focus sidebar search
+  // Keyboard Shortcuts: Ctrl/Cmd + S = Save, Ctrl/Cmd + N = New File, Ctrl/Cmd + F = Find
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const isCmdOrCtrl = e.ctrlKey || e.metaKey;
@@ -403,27 +366,6 @@ export default function App() {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [handleManualSave]);
-
-  // Handle Switch Pad
-  const handleSelectPad = useCallback((newPad: string) => {
-    const sanitized = sanitizePadId(newPad);
-    if (sanitized === currentPad) return;
-
-    const url = new URL(window.location.href);
-    if (sanitized === 'main') {
-      url.searchParams.delete('pad');
-    } else {
-      url.searchParams.set('pad', sanitized);
-    }
-    url.searchParams.delete('file');
-    window.history.pushState({}, '', url.toString());
-
-    setCurrentPad(sanitized);
-    setActiveFileId(null);
-    setText('');
-    setRemoteConflict(null);
-    setHasUnsavedChanges(false);
-  }, [currentPad]);
 
   // Create New File
   const handleCreateFile = async (name: string) => {
@@ -486,7 +428,6 @@ export default function App() {
     try {
       await deleteFileDoc(currentPad, fileIdToDelete);
 
-      // If active file was deleted, switch to another available file
       if (activeFileId === fileIdToDelete) {
         const remaining = files.filter((f) => f.id !== fileIdToDelete);
         if (remaining.length > 0) {
@@ -525,18 +466,15 @@ export default function App() {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    // Reset input value so same file can be chosen again
     e.target.value = '';
 
-    // Check size limit: 1 MB max
     if (file.size > 1024 * 1024) {
-      alert(`File "${file.name}" is too large (${(file.size / 1024 / 1024).toFixed(2)} MB). Please select a file under 1 MB.`);
+      alert(`File "${file.name}" is too large. Please select a file under 1 MB.`);
       return;
     }
 
-    // Check file type
     if (!file.name.endsWith('.txt') && file.type && !file.type.includes('text')) {
-      alert('Only .txt text files are supported for import.');
+      alert('Only .txt files are supported for import.');
       return;
     }
 
@@ -545,7 +483,6 @@ export default function App() {
       try {
         const fileContent = (event.target?.result as string) || '';
         const cleanName = file.name.replace(/\.txt$/i, '');
-        const existingNames = files.map((f) => f.name);
         const newFile = await createFile(currentPad, cleanName, fileContent);
         setActiveFileId(newFile.id);
         setText(fileContent);
@@ -555,7 +492,7 @@ export default function App() {
       }
     };
     reader.onerror = () => {
-      alert('Failed to read the selected file.');
+      alert('Failed to read selected file.');
     };
     reader.readAsText(file);
   };
@@ -579,8 +516,8 @@ export default function App() {
   const handleShare = async () => {
     const shareUrl = window.location.href;
     const shareData = {
-      title: `Cloud Text Pad - ${activeFile?.name || 'Note'}`,
-      text: 'Access this shared text pad note:',
+      title: `Cloud Text Pad - ${activeFile?.name || 'Notes'}`,
+      text: 'View note on Cloud Text Pad:',
       url: shareUrl,
     };
 
@@ -588,14 +525,14 @@ export default function App() {
       try {
         await navigator.share(shareData);
         return;
-      } catch (err) {
+      } catch {
         // Fallback to clipboard
       }
     }
     navigator.clipboard.writeText(shareUrl);
   };
 
-  // Refresh current file from Firestore
+  // Refresh current file
   const handleRefresh = async () => {
     if (!activeFileId) return;
     setIsRefreshing(true);
@@ -660,15 +597,11 @@ export default function App() {
         className="hidden"
       />
 
-      {/* Top Header */}
+      {/* Clean Top Header */}
       <Header
-        currentPad={currentPad}
         isOnline={isOnline}
         isDarkMode={isDarkMode}
         onToggleDarkMode={() => setIsDarkMode(!isDarkMode)}
-        onOpenSettings={() => setIsSettingsOpen(true)}
-        onOpenPadSwitcher={() => setIsPadSwitcherOpen(true)}
-        isFirebaseActive={isFirebaseActive}
         onToggleMobileSidebar={() => setIsMobileSidebarOpen(!isMobileSidebarOpen)}
       />
 
@@ -701,7 +634,7 @@ export default function App() {
             />
           ) : (
             <>
-              {/* Current File Name & Header */}
+              {/* Current File Header */}
               <CurrentFileHeader
                 file={activeFile}
                 onRename={(newName) => handleRenameFile(newName)}
@@ -751,7 +684,7 @@ export default function App() {
                 />
               )}
 
-              {/* Remote Conflict Notification Banner */}
+              {/* Remote Conflict Banner */}
               {remoteConflict && (
                 <RemoteConflictBanner
                   remoteUpdatedAt={remoteConflict.remoteUpdatedAt}
@@ -768,19 +701,21 @@ export default function App() {
                 />
               )}
 
-              {/* Large Textarea Editor */}
+              {/* Textarea Editor with timeout protection and retry */}
               <main className="flex-1 flex flex-col min-h-0 relative">
                 <Editor
                   value={text}
                   onChange={handleTextChange}
-                  isLoading={isLoadingActiveFile}
+                  isLoading={isLoadingActiveFile || (isLoadingFiles && files.length > 0)}
+                  loadError={errorMessage}
+                  onRetry={handleRetry}
                   selectedRange={isSearchOpen ? currentMatchRange : null}
                   placeholder="Type or paste your notes, code, or shared text here... Changes save automatically."
                   disabled={!activeFile}
                 />
               </main>
 
-              {/* Footer / Status */}
+              {/* Footer Status */}
               <FooterStatus
                 status={saveStatus}
                 lastUpdated={lastUpdated}
@@ -818,27 +753,11 @@ export default function App() {
         onConfirm={handleDeleteFile}
       />
 
-      {/* Confirmation Modal for Clearing Text */}
+      {/* Confirm Clear Modal */}
       <ConfirmClearModal
         isOpen={isClearModalOpen}
         onCancel={() => setIsClearModalOpen(false)}
         onConfirm={handleConfirmClear}
-      />
-
-      {/* Pad Switcher Modal */}
-      <PadSwitcherModal
-        isOpen={isPadSwitcherOpen}
-        currentPad={currentPad}
-        onSelectPad={handleSelectPad}
-        onClose={() => setIsPadSwitcherOpen(false)}
-        recentPads={recentPads}
-      />
-
-      {/* Settings Modal */}
-      <SettingsModal
-        isOpen={isSettingsOpen}
-        onClose={() => setIsSettingsOpen(false)}
-        isFirebaseActive={isFirebaseActive}
       />
 
       {/* Backup & Restore Modal */}

@@ -17,11 +17,11 @@ export const EmptyState: React.FC<EmptyStateProps> = ({
       </div>
 
       <h2 className="text-xl font-bold text-stone-900 dark:text-white mb-2">
-        Your text space is empty
+        No text files yet
       </h2>
 
       <p className="text-sm text-stone-500 dark:text-stone-400 max-w-sm mb-6">
-        Create your first text file or import an existing .txt file to start writing notes, code, or shared ideas.
+        Create your first file or import a .txt file to start writing notes, code, or shared ideas.
       </p>
 
       <div className="flex flex-wrap items-center justify-center gap-3">

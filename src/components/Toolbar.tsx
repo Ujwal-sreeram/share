@@ -74,7 +74,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
                 ? 'bg-amber-600 hover:bg-amber-500 text-white dark:bg-amber-500 dark:hover:bg-amber-400'
                 : 'bg-stone-800 hover:bg-stone-700 text-white dark:bg-stone-700 dark:hover:bg-stone-600'
             } disabled:opacity-50`}
-            title="Save changes to Firebase (Ctrl+S)"
+            title="Save changes (Ctrl+S)"
           >
             {isSaving ? (
               <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -140,7 +140,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
             onClick={onRefresh}
             disabled={disabled || isRefreshing}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs sm:text-sm font-medium bg-white dark:bg-stone-800 text-stone-700 dark:text-stone-200 hover:bg-stone-100 dark:hover:bg-stone-700 border border-stone-200 dark:border-stone-700 transition disabled:opacity-50"
-            title="Reload latest text from Firestore"
+            title="Reload latest text"
           >
             <RotateCw className={`w-3.5 h-3.5 text-stone-500 ${isRefreshing ? 'animate-spin' : ''}`} />
             <span>Refresh</span>
